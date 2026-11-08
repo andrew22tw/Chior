@@ -4,3 +4,5 @@ inspect_report*.txt
 *.png
 __pycache__/
 captures/
+source_history/
+wishes.json

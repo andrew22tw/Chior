@@ -68,6 +68,32 @@ MY_BOOKINGS_JS = r"""
 """
 
 
+SOURCE_JS = r"""
+() => {
+  const html = document.documentElement.outerHTML;
+  const calls = Array.from(html.matchAll(/\.createBooking\(([^)]*)\)/g)).map(m => m[1].replace(/\s+/g, ' '));
+  return {html, calls, title: document.title};
+}
+"""
+
+DRY_JS = r"""
+(uid) => new Promise(res => google.script.run
+  .withSuccessHandler(r => {
+    if (!r || !r.success) return res({err: (r && r.message) || '讀取失敗'});
+    const me = (r.staffList || []).find(s => String(s.empId).toUpperCase() === String(uid).toUpperCase());
+    res({settings: r.systemSettings, locations: r.locations, shifts: (r.shifts || []).map(s => s.name),
+         days: (r.scheduleDays || []).map(d => [d.date, d.note || '']),
+         me: me ? {name: me.name, zone: me.zone, batch: me.batch} : null,
+         mine: (r.bookings || []).filter(b => String(b.empId).toUpperCase() === String(uid).toUpperCase())
+                 .map(b => [b.date, b.location, b.shift, b.clinicType || '診1']),
+         taken: (r.bookings || []).map(b => [b.date, b.location, b.shift, b.clinicType || '診1'])});
+  })
+  .withFailureHandler(e => res({err: String(e)})).getInitialData())
+"""
+
+EXPECTED_CALL = "currentBookingSlot.date, currentBookingSlot.location, currentBookingSlot.shift, currentBookingSlot.clinicType, empId, password"
+
+
 def build_plan(wishes):
     """wishes: [{date, site, shift, clinics}] → 依日期分組（由後往前），每天的候選依清單順序 × 診別順序。"""
     days = {}
@@ -144,6 +170,77 @@ class FastBooker:
             self.result[idx] = text
             self.on_status(idx, text)
 
+    def check_source(self, frame):
+        """每次都讀系統原始碼：存檔、和上次比較、確認 createBooking 參數沒變。"""
+        import hashlib
+        from pathlib import Path
+        src = frame.evaluate(SOURCE_JS)
+        h = hashlib.sha256(src["html"].encode()).hexdigest()[:12]
+        d = Path(__file__).with_name("source_history")
+        d.mkdir(exist_ok=True)
+        last = d / "latest.txt"
+        prev = last.read_text().strip() if last.exists() else ""
+        f = d / f"{dt.date.today().isoformat()}_{h}.html"
+        if not f.exists():
+            f.write_text(src["html"], encoding="utf-8")
+        last.write_text(h)
+        if not prev:
+            self.log(f"已保存系統原始碼（{src['title']}，版本 {h}）")
+        elif prev == h:
+            self.log(f"系統原始碼和上次相同（版本 {h}）")
+        else:
+            self.log(f"⚠ 系統原始碼已變更（{prev} → {h}），新版保存在 {f.name}")
+        ok = any(c.strip() == EXPECTED_CALL for c in src["calls"])
+        if ok:
+            self.log("✓ createBooking(日期, 院區, 班別, 診別, 員編, 密碼) 參數和程式一致")
+        else:
+            self.log(f"⚠ createBooking 呼叫方式可能變了：{src['calls'][:2]} — 請把 source_history 給開發者")
+        return ok
+
+    def dry_run(self, frame):
+        """測試模式：不送出任何預約，只檢查。"""
+        o = self.o
+        self.log("【測試模式】不會送出任何預約")
+        r = frame.evaluate(DRY_JS, o["user_id"])
+        if r.get("err"):
+            self.log(f"✗ 讀取系統資料失敗：{r['err']}")
+            return
+        st = r["settings"] or {}
+        self.log(f"系統設定：模式 {st.get('mode')}，每月 {st.get('openDay')} 日 "
+                 f"{st.get('openStartTime')}–{st.get('openEndTime')} 開放")
+        self.log(f"院區 {r['locations']}；班別 {r['shifts']}")
+        if r["me"]:
+            m = r["me"]
+            self.log(f"✓ ID {o['user_id']} 存在：{m['name']}（{m['zone']} {m['batch']}）— 密碼只能在正式送出時驗證")
+        else:
+            self.log(f"✗ 系統名單中找不到 ID {o['user_id']}，請確認")
+        months = sorted({w["date"].strftime("%Y-%m") for w in o["wishes"]}) or []
+        for mth in months:
+            ds = [d for d, n in r["days"] if d.startswith(mth)]
+            self.log(f"{mth} 可排日期：{'、'.join(x[5:] for x in ds) or '（系統尚未設定）'}")
+        if r["mine"]:
+            for b in sorted(r["mine"]):
+                self.log(f"  你已有的預約：{b[0]} {b[1]} {b[2]} {b[3]}")
+        taken = {tuple(x) for x in r["taken"]}
+        days = {d for d, _ in r["days"]}
+        mine_days = {b[0] for b in r["mine"]}
+        self.log("預定送出順序（同時送出各天；同一天依序）：")
+        for day in build_plan(o["wishes"]):
+            dd = day["date"]
+            warn = [] if dd in days else ["⚠ 不是系統的排班日"]
+            if dd in mine_days:
+                warn.append("⚠ 這天你已有預約，系統會拒絕")
+            self.log(f"  {dd} {' '.join(warn)}")
+            for c in day["cands"]:
+                bad = []
+                if c["location"] not in r["locations"]:
+                    bad.append("院區名稱不符")
+                if c["shift"] not in r["shifts"]:
+                    bad.append("班別名稱不符")
+                state = "已被約" if (dd, c["location"], c["shift"], c["clinic"]) in taken else "目前空"
+                self.log(f"    {c['location']} {c['shift']} {c['clinic']}：{state} {' '.join(bad)}")
+                self.on_status(c["idx"], f"測試OK（{state}）" if not bad else "✗ " + " ".join(bad))
+
     # ---------------------------------------------------------------- main
     def run(self):
         from playwright.sync_api import sync_playwright
@@ -178,6 +275,10 @@ class FastBooker:
                 frame = self._find_app_frame()
                 self.log(f"系統就緒（{time.time() - t:.1f} 秒）")
                 cap.capture("載入")
+                self.check_source(frame)
+                if o.get("dry_run"):
+                    self.dry_run(frame)
+                    raise core.Stopped()
                 if open_ts:
                     # 不提早：準時在標準時間送出
                     core.wait_until(open_ts, off, self.stop, self.log, "距離開放 ")
@@ -203,7 +304,7 @@ class FastBooker:
                     self.log(f"  確認失敗：{mine}")
                 cap.capture("完成")
             except core.Stopped:
-                self.log("已停止")
+                self.log("測試完成（沒有送出任何預約）" if o.get("dry_run") else "已停止")
             except Exception as e:
                 self.log(f"錯誤：{e}")
                 try:

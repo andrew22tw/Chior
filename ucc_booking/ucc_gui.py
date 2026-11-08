@@ -209,9 +209,10 @@ class App(tk.Tk):
         btns.pack(fill="x", **P)
         self.btn_sched = ttk.Button(btns, text="⏰ 開始排程（時間到立即開始）", command=lambda: self._start(True))
         self.btn_now = ttk.Button(btns, text="▶ 立即執行", command=lambda: self._start(False))
+        self.btn_test = ttk.Button(btns, text="🧪 測試（不送出）", command=self._test)
         self.btn_cap = ttk.Button(btns, text="🔍 手動操作並錄下原始碼", command=self._capture_only)
         self.btn_stop = ttk.Button(btns, text="■ 停止", command=self._stop, state="disabled")
-        for b in (self.btn_sched, self.btn_now, self.btn_cap, self.btn_stop):
+        for b in (self.btn_sched, self.btn_now, self.btn_test, self.btn_cap, self.btn_stop):
             b.pack(side="left", padx=3)
 
         logf = ttk.LabelFrame(mid, text="執行紀錄")
@@ -415,6 +416,20 @@ class App(tk.Tk):
         self.log(f"共 {len(self.wishes)} 筆；" + ("排程中，請勿關閉視窗、勿讓電腦睡眠" if open_ts else "立即執行"))
         self._launch(lambda b: b.run(), opts, fast=True)
 
+    def _test(self):
+        """測試：載入系統、檢查 ID 與清單、讀原始碼，不送出任何預約。"""
+        if not self.wishes:
+            return messagebox.showwarning("提醒", "清單是空的，請先加入要登記的班")
+        cred = CredDialog(self).result
+        if not cred:
+            return
+        opts = {"url": self.url.get().strip(), "user_id": cred[0], "password": "",
+                "wishes": [{"date": w["date"], "site": w["site"], "shift": w["shift"],
+                            "clinics": CLINIC_ORDERS[w["order"]]} for w in self.wishes],
+                "dry_run": True, "capture": self.capture.get(), "headless": False, "keep_open": True}
+        self.log("開始測試（不會送出預約）")
+        self._launch(lambda b: b.run(), opts, fast=True)
+
     def _capture_only(self):
         self.log("開啟網頁，請手動操作一輪（點日期、點班、輸入帳密）；結束按『停止』")
         self._launch(lambda b: b.run_capture_only(), {"url": self.url.get().strip(), "user_id": "", "password": ""})
@@ -439,7 +454,7 @@ class App(tk.Tk):
 
     def _running(self, on):
         st = "disabled" if on else "normal"
-        for b in [self.btn_sched, self.btn_now, self.btn_cap] + self.edit_btns:
+        for b in [self.btn_sched, self.btn_now, self.btn_test, self.btn_cap] + self.edit_btns:
             b.config(state=st)
         self.btn_stop.config(state="normal" if on else "disabled")
 

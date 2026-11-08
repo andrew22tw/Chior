@@ -1,52 +1,55 @@
 # UCC 支援護理人力預班 自動登記工具
 
-自動開啟預班系統 → 選姓名 → 輸入密碼 → 登入 → 勾選指定 **日期 / 院區（林森、昆明、廣慈）/ 班別** → （可選）送出。
+圖形介面：先選 **日期 + 喜歡的班（院區／診1・診2・備援／白・夜）**，輸入 **ID / 密碼**，
+程式會 **對齊國家標準時間**，提前開好網頁並預填，**時間一到立刻按登入**，
+接著照系統流程「左邊點日期 → 右邊點班」逐日登記。
 
-> 只用來登記你自己的班。密碼存在本機 `config.json`（已加入 .gitignore），也可以留空，執行時再輸入。
+## 安裝與啟動
 
-## 安裝（在自己的電腦）
+需要 Python 3.9 以上（Windows 從 python.org 安裝時請勾選 *Add to PATH*）。
 
-```bash
-pip install -r requirements.txt
-python -m playwright install chromium
-cp config.example.json config.json
-```
+- **Windows**：雙擊 `start.bat`（第一次會自動安裝套件）
+- **Mac**：雙擊 `start.command`
+- 或手動：
+  ```bash
+  pip install -r requirements.txt
+  python -m playwright install chromium
+  python ucc_gui.py
+  ```
 
-## 設定 `config.json`
+## 使用步驟
 
-| 欄位 | 說明 |
+1. **① 選擇日期**：切到要登記的月份，點日期（綠色＝已選）。有「全選／週末／平日／清除」快捷鍵。
+2. **② 喜歡的班**：勾選院區、診別（診1／診2／備援）、班別（白班／夜班）。
+   - 「每天最多選 N 班」：預設 1。依 **院區 → 診別 → 班別** 的順序找第一個還有空位的班，額滿會自動換下一個。
+3. **③ 帳號**：輸入 ID、密碼（密碼不會存檔）。
+4. **④ 開放時間**：例如 `2026-12-14 09:00:00`。上方大時鐘是校時後的 **國家標準時間**
+   （NTP：time.stdtime.gov.tw，連不到時改用 Google 伺服器時間）。
+5. 按 **⏰ 開始排程**：
+   - 開放前 20 秒自動開瀏覽器、載入網頁、預填 ID／密碼
+   - 標準時間一到立刻按登入；若顯示尚未開放，會自動重新整理重試（預設 30 次）
+   - 登入後依序點日期、點班
+6. **送出方式**：`none` 不自動送出（停在畫面讓你確認，建議第一次使用）、`each` 每天選完就送出、`end` 全部選完才送出。
+
+「▶ 立即執行」可在開放後直接跑，或先拿來測試。
+
+> 排程期間請保持電腦開機、不要睡眠，網路穩定。只登記你自己的班。
+
+## 進階設定
+
+| 項目 | 說明 |
 |---|---|
-| `name` | 你的姓名（留空 → 執行時從下拉清單選） |
-| `password` | 密碼（留空 → 執行時輸入，不會顯示） |
-| `sites` | 要登記的院區，例如 `["林森","昆明"]` |
-| `dates` | 日期，可寫區間：`["2026-10-03", "2026-10-10~2026-10-12"]` |
-| `shifts` | 班別關鍵字（白班/小夜/大夜），留空 = 不限 |
-| `open_time` | 開放時間，配合 `--wait` 使用 |
-| `selectors` | 自動偵測失敗時手動填 CSS selector |
+| 提前幾秒開網頁預填 | 預設 20 秒 |
+| 提早按登入（毫秒） | 預設 0＝準時按；網路慢可設 100～300 |
+| 未開放時重試次數 | 預設 30（每次約 1 秒） |
 
-## 使用
+## 如果抓不到欄位或點錯班
+
+我們還沒在真正的網頁上測試，第一次請先用 `none` 模式確認。若有問題：
 
 ```bash
-# 1. 第一次先檢查網頁結構（輸出 inspect_report.txt + inspect.png）
-python ucc_booking.py inspect
-
-# 2. 登入並勾選，停在送出前讓你在瀏覽器確認（建議）
-python ucc_booking.py book
-
-# 3. 勾選後自動送出
-python ucc_booking.py book --submit
-
-# 4. 等到開放時間（open_time）才開始
-python ucc_booking.py book --wait --submit
-
-# 臨時覆寫設定
-python ucc_booking.py book --name 王小明 --site 林森 --date 2026-10-03 --date 2026-10-17~2026-10-18
+python ucc_booking.py --pause
 ```
 
-## 若自動偵測失敗
-
-1. 執行 `inspect`，打開 `inspect_report.txt` 找姓名、密碼、登入、送出按鈕的 id。
-2. 在 `config.json` 的 `selectors` 填入，例如 `"name": "#nameSelect"`、`"login_button": "#btnLogin"`。
-3. 若班表的格子結構特殊，把 `inspect_report.txt` 提供給開發者調整比對規則。
-
-出錯時程式會自動輸出 `inspect_report_error.txt` 方便排查。
+在開出的瀏覽器中手動登入並點一個日期，回到終端機按 Enter，會輸出 `inspect_report.txt` 與 `inspect.png`。
+自動執行出錯時也會產生 `inspect_report_error.txt`。把這些檔案提供給開發者即可調整。

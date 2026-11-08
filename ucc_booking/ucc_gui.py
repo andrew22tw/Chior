@@ -2,10 +2,11 @@
 """
 UCC 預班自動登記 — 圖形介面
 
-1. 月曆點選日期（可多選）→ 勾院區、白/夜、診別順序 →「加入清單」。同一天可加很多筆。
+1. 月曆點選日期（可多選）→ 勾院區、白/夜 →「加入清單」。
+   系統規定每人每天只能 1 班：同一天的多筆是「備選順序」，第一個成功就停。
 2. 設定開放時間（上方時鐘是國家標準時間）
 3. 按「開始排程」→ 程式詢問 ID / 密碼（只在這次有效，不存檔）
-4. 時間一到立刻開始：日期由後往前，點日期 → 點班（診1 沒有就診2，再沒有才備援）→ 填帳密送出
+4. 時間一到（標準時間，不提早）：所有日期同時直接送出預約（診1 → 診2 → 備援）
 """
 import calendar
 import datetime as dt
@@ -18,18 +19,17 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 
 import ucc_core as core
+import ucc_fast
 
 HERE = Path(__file__).resolve().parent
 SAVE = HERE / "gui_settings.json"     # 只存清單與時間設定，不存 ID / 密碼
 WEEK = "一二三四五六日"
 CLINIC_ORDERS = {
-    "診1→診2→備援": ["診1", "診2", "備援"],
-    "診1→診2": ["診1", "診2"],
-    "診2→診1→備援": ["診2", "診1", "備援"],
-    "只要診1": ["診1"],
-    "只要診2": ["診2"],
-    "只要備援": ["備援"],
+    "診1→診2→備援": ["診1", "診2", "備援"],     # 預設
+    "診2→診1→備援": ["診2", "診1", "備援"],     # 有時候互換
 }
+DEFAULT_ORDER = "診1→診2→備援"
+SWAP_ORDER = "診2→診1→備援"
 
 
 class CredDialog(tk.Toplevel):
@@ -100,10 +100,9 @@ class App(tk.Tk):
         self.wishes = []                      # [{date, site, shift, order}]
         self.site_vars = {s: tk.BooleanVar(value=(s == core.SITES[0])) for s in core.SITES}
         self.shift_vars = {s: tk.BooleanVar(value=(s == "白班")) for s in core.SHIFTS}
-        self.order = tk.StringVar(value="診1→診2→備援")
         self.url = tk.StringVar(value=core.DEFAULT_URL)
         self.open_time = tk.StringVar(value=f"{prev.year}-{prev.month:02d}-14 09:00:00")
-        self.preload = tk.IntVar(value=20)
+        self.preload = tk.IntVar(value=40)
         self.advance = tk.IntVar(value=0)
         self.retry_sec = tk.IntVar(value=90)
         self.capture = tk.BooleanVar(value=True)
@@ -149,11 +148,8 @@ class App(tk.Tk):
             ttk.Label(r, text=title, width=5).pack(side="left")
             for k, v in vs.items():
                 ttk.Checkbutton(r, text=k, variable=v).pack(side="left", padx=3)
-        r = ttk.Frame(pref)
-        r.pack(fill="x", pady=2)
-        ttk.Label(r, text="診別", width=5).pack(side="left")
-        ttk.Combobox(r, textvariable=self.order, values=list(CLINIC_ORDERS), state="readonly", width=16).pack(side="left")
-        ttk.Label(pref, text="診別順序：前一個額滿/被搶就立刻選下一個", foreground="gray").pack(anchor="w", padx=4)
+        ttk.Label(pref, text="診別一律 診1 → 診2 → 備援（額滿/被搶立刻換下一個）\n個別要 診2 先，選取該列後按「⇄ 診2先」",
+                  foreground="gray", justify="left").pack(anchor="w", padx=4)
         ttk.Button(pref, text="➕ 加入清單（日期 × 院區 × 班別）", command=self._add).pack(fill="x", padx=4, pady=6)
 
         # ④ 時間
@@ -172,11 +168,11 @@ class App(tk.Tk):
         self.countdown.pack(anchor="w", padx=6, pady=(0, 4))
 
         # ③ 清單
-        lf = ttk.LabelFrame(mid, text="③ 願望清單（執行時日期由後往前；同一天依清單順序）")
+        lf = ttk.LabelFrame(mid, text="③ 願望清單（每人每天只能 1 班：同一天多筆＝備選，依順序，成功一個就停）")
         lf.pack(fill="both", expand=True, **P)
-        cols = ("date", "wd", "site", "shift", "order", "status")
+        cols = ("date", "wd", "site", "shift", "status")
         self.tree = ttk.Treeview(lf, columns=cols, show="headings", height=12, selectmode="extended")
-        for c, t, w in zip(cols, ("日期", "星期", "院區", "班別", "診別順序", "結果"), (70, 45, 60, 60, 120, 220)):
+        for c, t, w in zip(cols, ("日期", "星期", "院區", "班別", "結果"), (70, 45, 60, 110, 260)):
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w, anchor="w" if c == "status" else "center", stretch=(c == "status"))
         sb = ttk.Scrollbar(lf, command=self.tree.yview)
@@ -188,7 +184,8 @@ class App(tk.Tk):
         self.tree.bind("<Delete>", lambda e: self._del())
         self.edit_btns = []
         for txt, fn in (("▲ 上移", lambda: self._move(-1)), ("▼ 下移", lambda: self._move(1)),
-                        ("刪除", self._del), ("清空", self._clear)):
+                        ("⇄ 診2先", self._swap), ("刪除", self._del), ("清空", self._clear),
+                        ("匯出雲端", self._export)):
             b = ttk.Button(bt, text=txt, width=8, command=fn)
             b.pack(pady=2)
             self.edit_btns.append(b)
@@ -199,8 +196,7 @@ class App(tk.Tk):
         adv.pack(fill="x", **P)
         ttk.Label(adv, text="提前開網頁(秒)").grid(row=0, column=0, sticky="e", **P)
         ttk.Spinbox(adv, from_=5, to=300, width=5, textvariable=self.preload).grid(row=0, column=1, sticky="w")
-        ttk.Label(adv, text="提早開始(毫秒)").grid(row=0, column=2, sticky="e", **P)
-        ttk.Spinbox(adv, from_=-2000, to=2000, increment=50, width=6, textvariable=self.advance).grid(row=0, column=3, sticky="w")
+        ttk.Label(adv, text="準時送出（不會提早）", foreground="gray").grid(row=0, column=2, columnspan=2, sticky="w", **P)
         ttk.Label(adv, text="未開放持續重試(秒)").grid(row=0, column=4, sticky="e", **P)
         ttk.Spinbox(adv, from_=10, to=600, width=5, textvariable=self.retry_sec).grid(row=0, column=5, sticky="w")
         ttk.Checkbutton(adv, text="保存網頁原始碼與網路請求（captures/，密碼會遮蔽）", variable=self.capture
@@ -277,7 +273,7 @@ class App(tk.Tk):
             for s in sites:
                 for h in shifts:
                     if (d, s, h) not in have:
-                        self.wishes.append({"date": d, "site": s, "shift": h, "order": self.order.get()})
+                        self.wishes.append({"date": d, "site": s, "shift": h, "order": DEFAULT_ORDER})
                         n += 1
         self.picked.clear()
         self._draw_calendar()
@@ -289,8 +285,9 @@ class App(tk.Tk):
         self.tree.delete(*self.tree.get_children())
         for i, w in enumerate(self.wishes):
             d = w["date"]
+            shift = w["shift"] + ("（診2先）" if w["order"] == SWAP_ORDER else "")
             self.tree.insert("", "end", iid=str(i), values=(f"{d.month}/{d.day}", WEEK[d.weekday()], w["site"],
-                                                            w["shift"], w["order"], w.get("status", "")))
+                                                            shift, w.get("status", "")))
         self.count_lbl.config(text=f"共 {len(self.wishes)} 筆")
 
     def _sel(self):
@@ -309,6 +306,28 @@ class App(tk.Tk):
         self._refresh_list()
         self.tree.selection_set([str(i) for i in new])
         self._save()
+
+    def _swap(self):
+        sel = self._sel()
+        if not sel:
+            return messagebox.showinfo("提示", "先選取清單中的列（可多選），再按「⇄ 診2先」切換")
+        for i in sel:
+            w = self.wishes[i]
+            w["order"] = DEFAULT_ORDER if w["order"] == SWAP_ORDER else SWAP_ORDER
+        self._refresh_list()
+        self.tree.selection_set([str(i) for i in sel])
+        self._save()
+
+    def _export(self):
+        """匯出給雲端執行的清單（不含帳號密碼）。"""
+        if not self.wishes:
+            return messagebox.showwarning("提醒", "清單是空的")
+        data = {"url": self.url.get().strip(), "open_time": self.open_time.get().strip(),
+                "wishes": [{"date": w["date"].isoformat(), "site": w["site"], "shift": w["shift"],
+                            "clinics": CLINIC_ORDERS[w["order"]]} for w in self.wishes]}
+        out = HERE / "wishes.json"
+        out.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        messagebox.showinfo("已匯出", f"已存成 {out}\n（不含帳號密碼）\n把內容貼給 Claude 即可在雲端執行。")
 
     def _del(self):
         sel = set(self._sel())
@@ -394,15 +413,16 @@ class App(tk.Tk):
         self.log(f"使用 ID：{cred[0]}（密碼 {len(cred[1])} 個字，不顯示、不存檔）")
         del cred
         self.log(f"共 {len(self.wishes)} 筆；" + ("排程中，請勿關閉視窗、勿讓電腦睡眠" if open_ts else "立即執行"))
-        self._launch(lambda b: b.run(), opts)
+        self._launch(lambda b: b.run(), opts, fast=True)
 
     def _capture_only(self):
         self.log("開啟網頁，請手動操作一輪（點日期、點班、輸入帳密）；結束按『停止』")
         self._launch(lambda b: b.run_capture_only(), {"url": self.url.get().strip(), "user_id": "", "password": ""})
 
-    def _launch(self, fn, opts):
+    def _launch(self, fn, opts, fast=False):
         self.stop = threading.Event()
-        booker = core.Booker(opts, self.log, self.stop, on_status=lambda i, t: self.q.put(("status", i, t)))
+        cls = ucc_fast.FastBooker if fast else core.Booker
+        booker = cls(opts, self.log, self.stop, on_status=lambda i, t: self.q.put(("status", i, t)))
         self.worker = threading.Thread(target=lambda: self._safe(fn, booker), daemon=True)
         self.worker.start()
         self._running(True)
@@ -446,7 +466,7 @@ class App(tk.Tk):
             try:
                 self.wishes.append({"date": dt.date.fromisoformat(w["date"]), "site": w["site"],
                                     "shift": w["shift"], "order": w.get("order") if w.get("order") in CLINIC_ORDERS
-                                    else "診1→診2→備援"})
+                                    else DEFAULT_ORDER})
             except Exception:
                 pass
         if self.wishes:

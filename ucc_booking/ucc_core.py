@@ -9,6 +9,7 @@ UCC 預班自動登記 — 核心邏輯（GUI 與命令列共用）
 - 自動保存網頁原始碼與網路請求（captures/），方便之後改寫更快的版本
 """
 import datetime as dt
+import os
 import re
 import socket
 import statistics
@@ -16,6 +17,7 @@ import struct
 import threading
 import time
 import email.utils
+import urllib.error
 import urllib.request
 
 DEFAULT_URL = ("https://script.google.com/macros/s/AKfycbwJqVMzejJMXYFv1o5b20WV2rUSAisgXbGTuvwrMKh"
@@ -59,15 +61,33 @@ def _sntp(server, timeout=2.0):
     return ((t1 - t0) + (t2 - t3)) / 2, (t3 - t0) - (t2 - t1)
 
 
-def _http_offset(url="https://www.google.com"):
-    """NTP 被擋時的備案：用 HTTP Date 標頭（精度約 ±0.5 秒）。"""
-    t0 = time.time()
-    req = urllib.request.Request(url, method="HEAD")
-    with urllib.request.urlopen(req, timeout=5) as r:
-        date = r.headers["Date"]
-    t1 = time.time()
-    server = email.utils.parsedate_to_datetime(date).timestamp() + 0.5  # 秒數被截斷，取中間值
-    return server - (t0 + t1) / 2, t1 - t0
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
+
+
+_NO_REDIRECT = urllib.request.build_opener(_NoRedirect)
+
+
+def _http_offset(url="https://www.google.com", samples=8):
+    """NTP 被擋時的備案：HTTP Date 標頭只到秒，用多次取樣的『秒數跳動』交集把誤差縮到約 ±50ms。"""
+    lo, hi, last = -1e9, 1e9, None
+    for i in range(samples):
+        t0 = time.time()
+        try:
+            with _NO_REDIRECT.open(urllib.request.Request(url, method="HEAD"), timeout=5) as r:
+                date = r.headers["Date"]
+        except urllib.error.HTTPError as e:      # 302 等轉址回應也有 Date
+            date = e.headers["Date"]
+        t1 = time.time()
+        sec = email.utils.parsedate_to_datetime(date).timestamp()
+        # 伺服器時間介於 [sec, sec+1)，且發生在本機 [t0, t1] 之間
+        lo, hi = max(lo, sec - t1), min(hi, sec + 1 - t0)
+        last = t1 - t0
+        time.sleep(0.113 * (i % 3 + 1))     # 錯開取樣點
+    if lo > hi:                               # 網路抖動造成矛盾，退回中間值
+        return (lo + hi) / 2, last
+    return (lo + hi) / 2, max(hi - lo, last) / 2
 
 
 def sync_time(log=print, samples=4):
@@ -87,14 +107,17 @@ def sync_time(log=print, samples=4):
             msg = f"{srv}（NTP），本機時差 {off*1000:+.0f} ms，網路延遲 {delay*1000:.0f} ms"
             log(f"校時成功：{msg}")
             return off, msg
-    try:
-        off, delay = _http_offset()
-        msg = f"Google HTTP 時間（精度約 ±0.5 秒），本機時差 {off*1000:+.0f} ms"
-        log(f"NTP 無法連線，改用 {msg}")
-        return off, msg
-    except Exception as e:
-        log(f"校時失敗，改用本機時間：{e}")
-        return 0.0, "本機時間（未校時）"
+    err = None
+    for url in ("https://script.google.com", "https://www.google.com"):
+        try:
+            off, delay = _http_offset(url)
+            msg = f"{url.split('//')[1]} HTTP 時間（誤差約 ±{delay*1000:.0f} ms），本機時差 {off*1000:+.0f} ms"
+            log(f"NTP 無法連線，改用 {msg}")
+            return off, msg
+        except Exception as e:
+            err = e
+    log(f"校時失敗，改用本機時間：{err}")
+    return 0.0, "本機時間（未校時）"
 
 
 def wait_until(target_ts, offset, stop: threading.Event, log=print, label=""):
@@ -281,6 +304,7 @@ class Booker:
     opts = {
       url, user_id, password,                # 只存在記憶體，不寫檔
       wishes: [{date, site, shift, clinics:[診1,診2,備援]}],   # 願望清單，同一天可多筆
+      keep_open: 完成後保持瀏覽器開啟（GUI 用 True，雲端用 False）
       open_ts: 開放時間 epoch 秒（標準時間）或 None 立即, offset: 校時差,
       preload_sec, advance_ms, retry_sec（未開放時持續重試秒數）, headless,
       capture: 是否保存原始碼（預設 True）
@@ -610,11 +634,13 @@ class Booker:
             kw = {"headless": o.get("headless", False)}
             if o.get("chrome_path"):
                 kw["executable_path"] = o["chrome_path"]
+            if os.environ.get("HTTPS_PROXY"):                 # 雲端環境走代理
+                kw["proxy"] = {"server": os.environ["HTTPS_PROXY"]}
             try:
                 browser = p.chromium.launch(**kw)
             except Exception:
                 browser = p.chromium.launch(channel="chrome", **kw)
-            ctx = browser.new_context()
+            ctx = browser.new_context(ignore_https_errors=False)
             # 不載入圖片/字型/影片，加快速度
             ctx.route("**/*", lambda r: r.abort() if r.request.resource_type in ("image", "font", "media")
                       else r.continue_())
@@ -656,6 +682,7 @@ class Booker:
                 ok = 0
                 for idx, w in wishes:
                     self.on_status(idx, "處理中…")
+                    tb = time.time()
                     try:
                         res = self.book(w)
                     except Stopped:
@@ -666,6 +693,7 @@ class Booker:
                         res = f"! 錯誤 {str(e)[:60]}"
                     ok += res.startswith("✓")
                     d = w["date"]
+                    res += f"（{time.time() - tb:.2f} 秒）"
                     self.log(f"{d.month}/{d.day} {w['site']} {w['shift']}：{res}")
                     self.on_status(idx, res)
                     if self.step < 4:
@@ -684,7 +712,10 @@ class Booker:
                 except Exception:
                     pass
             self.o["password"] = ""          # 用完即清除
-            self.log("瀏覽器保持開啟，可手動檢查；按『停止』關閉。")
+            if not o.get("keep_open", True):
+                self.stop.set()
+            else:
+                self.log("瀏覽器保持開啟，可手動檢查；按『停止』關閉。")
             while not self.stop.is_set():
                 try:
                     self.page.wait_for_timeout(300)

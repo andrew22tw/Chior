@@ -3,3 +3,4 @@ gui_settings.json
 inspect_report*.txt
 *.png
 __pycache__/
+captures/

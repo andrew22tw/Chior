@@ -72,7 +72,9 @@ SOURCE_JS = r"""
 () => {
   const html = document.documentElement.outerHTML;
   const calls = Array.from(html.matchAll(/\.createBooking\(([^)]*)\)/g)).map(m => m[1].replace(/\s+/g, ' '));
-  return {html, calls, title: document.title};
+  // 只比對系統的程式碼（<script>），畫面內容會隨資料變動，不納入比對
+  const code = Array.from(document.scripts).map(s => s.textContent).join('\n');
+  return {html, code, calls, title: document.title};
 }
 """
 
@@ -92,6 +94,15 @@ DRY_JS = r"""
 """
 
 EXPECTED_CALL = "currentBookingSlot.date, currentBookingSlot.location, currentBookingSlot.shift, currentBookingSlot.clinicType, empId, password"
+
+
+SHOW_JS = r"""
+(date) => { try {
+  if (typeof fetchSystemData === 'function')
+    fetchSystemData(() => { try { if (date && typeof selectDate === 'function') selectDate(date); } catch (e) {} });
+  else if (date && typeof selectDate === 'function') selectDate(date);
+} catch (e) {} return true; }
+"""
 
 
 def build_plan(wishes):
@@ -171,12 +182,22 @@ class FastBooker:
             self.result[idx] = text
             self.on_status(idx, text)
 
+    def _show(self, frame, date):
+        """讓系統網頁自己重新整理並跳到該日期，你可以在瀏覽器上直接看到結果。"""
+        if self.o.get("headless"):
+            return
+        try:
+            frame.evaluate(SHOW_JS, date)
+            self.log(f"瀏覽器畫面已更新到 {date[5:] if date else ''}（可在系統畫面上點其他日期查看）")
+        except Exception:
+            pass
+
     def check_source(self, frame):
         """每次都讀系統原始碼：存檔、和上次比較、確認 createBooking 參數沒變。"""
         import hashlib
         from pathlib import Path
         src = frame.evaluate(SOURCE_JS)
-        h = hashlib.sha256(src["html"].encode()).hexdigest()[:12]
+        h = hashlib.sha256(src["code"].encode()).hexdigest()[:12]
         d = Path(__file__).with_name("source_history")
         d.mkdir(exist_ok=True)
         last = d / "latest.txt"
@@ -190,7 +211,7 @@ class FastBooker:
         elif prev == h:
             self.log(f"系統原始碼和上次相同（版本 {h}）")
         else:
-            self.log(f"⚠ 系統原始碼已變更（{prev} → {h}），新版保存在 {f.name}")
+            self.log(f"⚠ 系統程式碼已變更（{prev} → {h}），新版保存在 {f.name}")
         ok = any(c.strip() == EXPECTED_CALL for c in src["calls"])
         if ok:
             self.log("✓ createBooking(日期, 院區, 班別, 診別, 員編, 密碼) 參數和程式一致")
@@ -279,6 +300,7 @@ class FastBooker:
                 self.check_source(frame)
                 if o.get("dry_run"):
                     self.dry_run(frame)
+                    self._show(frame, min(w["date"] for w in o["wishes"]).isoformat() if o["wishes"] else None)
                     raise core.Stopped()
                 if open_ts:
                     # 不提早：準時在標準時間送出
@@ -327,6 +349,7 @@ class FastBooker:
                         self.log(f"  系統紀錄：{b[0]} {b[1]} {b[2]} {b[3]}")
                     if not mine:
                         self.log("  系統中沒有你的預約")
+                self._show(frame, plan[-1]["date"] if plan else None)
                 cap.capture("完成")
             except core.Stopped:
                 self.log("測試完成（沒有送出任何預約）" if o.get("dry_run") else "已停止")

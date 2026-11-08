@@ -16,7 +16,7 @@ import threading
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import messagebox, ttk
 
 import ucc_core as core
 import ucc_fast
@@ -185,7 +185,7 @@ class App(tk.Tk):
         self.edit_btns = []
         for txt, fn in (("▲ 上移", lambda: self._move(-1)), ("▼ 下移", lambda: self._move(1)),
                         ("⇄ 診2先", self._swap), ("刪除", self._del), ("清空", self._clear),
-                        ("匯入清單", self._import), ("匯出雲端", self._export)):
+                        ("匯出雲端", self._export)):
             b = ttk.Button(bt, text=txt, width=8, command=fn)
             b.pack(pady=2)
             self.edit_btns.append(b)
@@ -318,37 +318,6 @@ class App(tk.Tk):
         self._refresh_list()
         self.tree.selection_set([str(i) for i in sel])
         self._save()
-
-    def _import(self, path=None):
-        """匯入清單檔（wishes.json 格式），取代目前清單。"""
-        path = path or filedialog.askopenfilename(
-            title="選擇清單檔", initialdir=str(HERE / "清單"), filetypes=[("清單", "*.json"), ("全部", "*.*")])
-        if not path:
-            return
-        try:
-            data = json.loads(Path(path).read_text(encoding="utf-8"))
-            new = []
-            for w in data["wishes"]:
-                cl = w.get("clinics") or CLINIC_ORDERS[DEFAULT_ORDER]
-                order = SWAP_ORDER if cl[:2] == ["診2", "診1"] else DEFAULT_ORDER
-                new.append({"date": dt.date.fromisoformat(w["date"]), "site": w["site"], "shift": w["shift"],
-                            "order": order})
-        except Exception as e:
-            return messagebox.showerror("匯入失敗", f"檔案格式不正確：{e}")
-        if self.wishes and not messagebox.askyesno("匯入", f"要用「{Path(path).name}」取代目前清單（{len(self.wishes)} 筆）嗎？"):
-            return
-        self.wishes = new
-        if data.get("open_time"):
-            self.open_time.set(data["open_time"])
-        first = min(w["date"] for w in new) if new else None
-        if first:
-            self.year.set(first.year)
-            self.month.set(first.month)
-        self.title(f"UCC 預班自動登記 — {Path(path).stem}")
-        self._draw_calendar()
-        self._refresh_list()
-        self._save()
-        self.log(f"已匯入 {Path(path).name}：{len(new)} 筆")
 
     def _export(self):
         """匯出給雲端執行的清單（不含帳號密碼）。"""
@@ -492,8 +461,6 @@ class App(tk.Tk):
     # ----------------------------------------------------------- 設定 ----
     def _save(self):
         data = {"url": self.url.get(), "open_time": self.open_time.get(),
-                "wishes": [{"date": w["date"].isoformat(), "site": w["site"], "shift": w["shift"],
-                            "order": w["order"]} for w in self.wishes],
                 "preload": self.preload.get(), "advance": self.advance.get(),
                 "retry_sec": self.retry_sec.get(), "capture": self.capture.get()}
         try:
@@ -508,17 +475,6 @@ class App(tk.Tk):
             return
         self.url.set(d.get("url") or core.DEFAULT_URL)
         self.open_time.set(d.get("open_time") or self.open_time.get())
-        for w in d.get("wishes", []):
-            try:
-                self.wishes.append({"date": dt.date.fromisoformat(w["date"]), "site": w["site"],
-                                    "shift": w["shift"], "order": w.get("order") if w.get("order") in CLINIC_ORDERS
-                                    else DEFAULT_ORDER})
-            except Exception:
-                pass
-        if self.wishes:
-            first = min(w["date"] for w in self.wishes)
-            self.year.set(first.year)
-            self.month.set(first.month)
         for k, var in (("preload", self.preload), ("advance", self.advance),
                        ("retry_sec", self.retry_sec), ("capture", self.capture)):
             if k in d:

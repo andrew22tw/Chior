@@ -46,7 +46,7 @@ async ({plan, uid, pw, retryMs, deadline}) => {
         if (/密碼|查無|帳號|員工編號|驗證失敗/.test(msg)) { stopAll = true; log('auth', c.idx, day.date, '', '', c.clinic, ms, msg); return 'auth'; }
         if (/未開放|尚未|開放時間|非開放|不在開放/.test(msg) && Date.now() < deadline) {
           log('notopen', c.idx, day.date, c.location, c.shift, c.clinic, ms, msg); await sleep(retryMs); continue; }
-        if (!r.ok && netTries++ < 2) { log('neterr', c.idx, day.date, c.location, c.shift, c.clinic, ms, msg); continue; }
+        if (netTries++ < 3) { log(r.ok ? 'retry' : 'neterr', c.idx, day.date, c.location, c.shift, c.clinic, ms, msg); continue; }
         log('fail', c.idx, day.date, c.location, c.shift, c.clinic, ms, msg);
         break;
       }
@@ -153,7 +153,8 @@ class FastBooker:
             "daydone": f"- 這天已有你的預約（{msg[:20]}）",
             "auth": f"✗ 帳號或密碼錯誤：{msg[:30]}",
             "notopen": f"… 伺服器回覆尚未開放，重試中",
-            "neterr": f"… 連線錯誤，重試（{msg[:30]}）",
+            "neterr": f"… 連線錯誤，立即重送（{msg[:30]}）",
+            "retry": f"… 未成功（{msg[:30]}），立即重送",
             "fail": f"✗ {clinic} 失敗：{msg[:30]}（{sec}）",
             "none": None,
         }.get(kind)
@@ -285,23 +286,47 @@ class FastBooker:
                 now = dt.datetime.fromtimestamp(time.time() + off).strftime("%H:%M:%S.%f")[:-3]
                 self.log(f"[標準時間 {now}] 同時送出 {len(plan)} 天：" + "、".join(x["date"][5:] for x in plan))
                 t0 = time.time()
-                res = frame.evaluate(ORCH_JS, {"plan": plan, "uid": o["user_id"], "pw": o["password"],
-                                               "retryMs": 300,
-                                               "deadline": int((time.time() + o.get("retry_sec", 90)) * 1000)})
-                ok = sum(r == "ok" for r in res)
-                self.log(f"完成：{ok}/{len(plan)} 天成功，總共 {time.time() - t0:.1f} 秒")
+                todo, mine, rounds = plan, [], o.get("max_rounds", 3)
+                for rnd in range(1, rounds + 1):
+                    res = frame.evaluate(ORCH_JS, {"plan": todo, "uid": o["user_id"], "pw": o["password"],
+                                                   "retryMs": 300,
+                                                   "deadline": int((time.time() + o.get("retry_sec", 90)) * 1000)})
+                    ok = sum(r == "ok" for r in res)
+                    self.log(f"第 {rnd} 輪：{ok}/{len(todo)} 天回報成功（累計 {time.time() - t0:.1f} 秒）")
+                    if "auth" in res:
+                        self.log("帳號或密碼錯誤，不再重送")
+                        break
+                    # 送出後一定向系統查證：以系統紀錄為準
+                    self.log("向系統查證預約紀錄…")
+                    mine = frame.evaluate(MY_BOOKINGS_JS, o["user_id"])
+                    if not isinstance(mine, list):
+                        self.log(f"  查證失敗（{mine}），改以伺服器回報為準")
+                        todo = [d for d, r in zip(todo, res) if r not in ("ok", "daydone")]
+                    else:
+                        have = {b[0] for b in mine}
+                        for d in plan:
+                            if d["date"] in have:
+                                b = next(x for x in mine if x[0] == d["date"])
+                                for c in d["cands"]:
+                                    if (c["location"], c["shift"], c["clinic"]) == (b[1], b[2], b[3]):
+                                        self.result[c["idx"]] = f"✓ 已確認：{b[3]}"
+                                        self.on_status(c["idx"], f"✓ 系統已確認：{b[1]} {b[2]} {b[3]}")
+                        todo = [d for d in plan if d["date"] not in have]
+                    if not todo:
+                        self.log("✓ 全部日期都已在系統中確認")
+                        break
+                    if rnd < rounds:
+                        self.log(f"⚠ 系統中仍沒有：{'、'.join(d['date'][5:] for d in todo)} → 立即重送（第 {rnd + 1} 輪）")
+                    else:
+                        self.log(f"✗ 重送 {rounds} 輪後仍沒有：{'、'.join(d['date'][5:] for d in todo)}")
                 for i, w in enumerate(o["wishes"]):
                     if i not in self.result:
                         self.on_status(i, "（同一天已有其他候選成功或未輪到）")
-                self.log("向系統確認你名下的預約…")
-                mine = frame.evaluate(MY_BOOKINGS_JS, o["user_id"])
                 if isinstance(mine, list):
                     for b in sorted(mine):
                         self.log(f"  系統紀錄：{b[0]} {b[1]} {b[2]} {b[3]}")
                     if not mine:
                         self.log("  系統中沒有你的預約")
-                else:
-                    self.log(f"  確認失敗：{mine}")
                 cap.capture("完成")
             except core.Stopped:
                 self.log("測試完成（沒有送出任何預約）" if o.get("dry_run") else "已停止")

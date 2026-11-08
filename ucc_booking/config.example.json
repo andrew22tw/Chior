@@ -1,0 +1,19 @@
+{
+  "url": "https://script.google.com/macros/s/AKfycbwJqVMzejJMXYFv1o5b20WV2rUSAisgXbGTuvwrMKhAjYmf9OcaIXDhs3YINjXVQFgZ8g/exec",
+
+  "name": "",
+  "password": "",
+
+  "sites": ["林森", "昆明", "廣慈"],
+  "dates": ["2026-10-03", "2026-10-10~2026-10-12"],
+  "shifts": [],
+
+  "open_time": "2026-09-14 09:00:00",
+
+  "selectors": {
+    "name": "",
+    "password": "",
+    "login_button": "",
+    "submit_button": ""
+  }
+}

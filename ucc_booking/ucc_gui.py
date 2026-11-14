@@ -18,10 +18,11 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+import check_settings
 import ucc_core as core
 import ucc_fast
 
-HERE = Path(__file__).resolve().parent
+HERE = core.app_dir()
 SAVE = HERE / "gui_settings.json"     # 只存清單與時間設定，不存 ID / 密碼
 WEEK = "一二三四五六日"
 CLINIC_ORDERS = {
@@ -97,6 +98,8 @@ class App(tk.Tk):
         prev = nxt - dt.timedelta(days=1)
         self.year, self.month = tk.IntVar(value=nxt.year), tk.IntVar(value=nxt.month)
         self.picked = set()                   # 月曆上暫選的日期
+        self.sys_dates = None                 # 系統公布的可排日期（None＝尚未讀取）
+        self.sys_info = None
         self.wishes = []                      # [{date, site, shift, order}]
         self.site_vars = {s: tk.BooleanVar(value=(s == core.SITES[0])) for s in core.SITES}
         self.shift_vars = {s: tk.BooleanVar(value=(s == "白班")) for s in core.SHIFTS}
@@ -113,6 +116,7 @@ class App(tk.Tk):
         self._refresh_list()
         self.after(100, self._tick)
         self.after(300, lambda: threading.Thread(target=self._sync, daemon=True).start())
+        self.after(600, self._read_system)
 
     # ================================================================ UI ====
     def _build(self):
@@ -164,6 +168,11 @@ class App(tk.Tk):
         ttk.Entry(r, textvariable=self.open_time, width=20).pack(side="left")
         ttk.Button(r, text="重新校時", command=lambda: threading.Thread(target=self._sync, daemon=True).start()
                    ).pack(side="right")
+        r2 = ttk.Frame(tm)
+        r2.pack(fill="x", padx=6)
+        self.sys_lbl = ttk.Label(r2, text="系統設定：讀取中…", foreground="#1f6f8b", wraplength=250, justify="left")
+        self.sys_lbl.pack(side="left")
+        ttk.Button(r2, text="從系統更新", command=self._read_system).pack(side="right")
         self.countdown = ttk.Label(tm, foreground="#c0392b", font=("", 11, "bold"))
         self.countdown.pack(anchor="w", padx=6, pady=(0, 4))
 
@@ -240,10 +249,45 @@ class App(tk.Tk):
                     continue
                 v = tk.BooleanVar(value=d in self.picked)
                 self.day_vars[d] = v
+                ok = self.sys_dates is None or not self.sys_dates or d in self.sys_dates
                 tk.Checkbutton(self.grid_frame, text=str(d.day) + ("•" if d in listed else ""), variable=v,
                                indicatoron=False, width=3, selectcolor="#7fd3a0",
                                fg="#c0392b" if c >= 5 else "black",
+                               bg="#d9f2e3" if (self.sys_dates and d in self.sys_dates) else None,
+                               state="normal" if ok else "disabled",
                                command=lambda d=d, v=v: self._toggle(d, v)).grid(row=r, column=c, padx=1, pady=1)
+
+    def _read_system(self):
+        """從系統讀取開放規則、下次開放時間與可排日期（背景執行，唯讀）。"""
+        self.sys_lbl.config(text="系統設定：讀取中…")
+
+        def work():
+            try:
+                info = check_settings.fetch()
+            except Exception as e:
+                info = {"err": str(e)}
+            self.q.put(("sys", info))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_system(self, info):
+        if info.get("err"):
+            self.sys_lbl.config(text=f"系統設定讀取失敗：{info['err'][:60]}")
+            self.log(f"讀取系統設定失敗：{info['err']}")
+            return
+        self.sys_info = info
+        old = self.open_time.get().strip()
+        new = info["next_open"] + ":00"
+        self.open_time.set(new)
+        y, m = map(int, info["target_month"].split("-"))
+        self.sys_dates = {dt.date.fromisoformat(d) for d in info.get("target_dates", [])}
+        self.year.set(y)
+        self.month.set(m)
+        days = "、".join(f"{d.month}/{d.day}" for d in sorted(self.sys_dates)) or "系統尚未公布"
+        self.sys_lbl.config(text=f"系統：{info['open_rule']}\n下次 {info['next_open']} 開放，預約 {m} 月\n可排：{days}")
+        self.log(f"系統設定：{info['open_rule']}；下次開放 {info['next_open']}（預約 {info['target_month']}）；可排日期：{days}")
+        if old and old != new:
+            self.log(f"⚠ 開放時間已依系統更新：{old} → {new}")
+        self._draw_calendar()
 
     def _toggle(self, d, v):
         (self.picked.add if v.get() else self.picked.discard)(d)
@@ -367,6 +411,8 @@ class App(tk.Tk):
             if kind == "log":
                 self.log_txt.insert("end", a[0] + "\n")
                 self.log_txt.see("end")
+            elif kind == "sys":
+                self._apply_system(a[0])
             elif kind == "status":
                 i, text = a
                 if 0 <= i < len(self.wishes):
@@ -481,10 +527,16 @@ class App(tk.Tk):
                 var.set(d[k])
 
 
+def selftest():
+    """打包後的自我測試：讀取系統設定（唯讀），結果寫到 selftest.txt。"""
+    info = check_settings.fetch()
+    (HERE / "selftest.txt").write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps(info, ensure_ascii=False))
+    return 1 if info.get("err") else 0
+
+
 if __name__ == "__main__":
-    try:
-        import playwright  # noqa: F401
-    except ImportError:
-        import sys
-        sys.exit("請先執行：pip install playwright && python -m playwright install chromium")
+    import sys
+    if "--selftest" in sys.argv:
+        sys.exit(selftest())
     App().mainloop()

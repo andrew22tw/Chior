@@ -45,28 +45,41 @@ def summarize(r):
             "checked_at": now.strftime("%Y-%m-%d %H:%M")}
 
 
-kw = {"executable_path": CHROME} if os.path.exists(CHROME) else {}
-if os.environ.get("HTTPS_PROXY"):
-    kw["proxy"] = {"server": os.environ["HTTPS_PROXY"]}
-with sync_playwright() as p:
-    b = p.chromium.launch(**kw)
-    pg = b.new_page()
-    pg.goto(URL, wait_until="domcontentloaded", timeout=60000)
-    fr = None
-    for _ in range(400):
-        for f in pg.frames:
-            try:
-                if f.evaluate("() => typeof google!=='undefined' && !!(google.script&&google.script.run)"):
-                    fr = f
+def fetch(chrome_path=None):
+    """讀取系統開放設定與下次可預約月份的日期（唯讀）。回傳 dict；失敗時含 err。"""
+    import ucc_core as core
+    if chrome_path is None and os.path.exists(CHROME):
+        chrome_path = CHROME
+    with sync_playwright() as p:
+        b = core.launch_browser(p, True, chrome_path)
+        try:
+            pg = b.new_page()
+            pg.goto(URL, wait_until="domcontentloaded", timeout=60000)
+            fr = None
+            for _ in range(400):
+                for f in pg.frames:
+                    try:
+                        if f.evaluate("() => typeof google!=='undefined' && !!(google.script&&google.script.run)"):
+                            fr = f
+                            break
+                    except Exception:
+                        pass
+                if fr:
                     break
-            except Exception:
-                pass
-        if fr:
-            break
-        pg.wait_for_timeout(100)
-    if not fr:
-        print(json.dumps({"err": "系統網頁載入失敗"}, ensure_ascii=False))
-    else:
-        r = fr.evaluate(JS)
-        print(json.dumps(r if r.get("err") else summarize(r), ensure_ascii=False))
-    b.close()
+                pg.wait_for_timeout(100)
+            if not fr:
+                return {"err": "系統網頁載入失敗"}
+            r = fr.evaluate(JS)
+            if r.get("err"):
+                return r
+            out = summarize(r)
+            out["target_dates"] = [d for d, _ in r["days"] if d.startswith(out["target_month"])]
+            return out
+        finally:
+            b.close()
+
+
+if __name__ == "__main__":
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    print(json.dumps(fetch(), ensure_ascii=False))

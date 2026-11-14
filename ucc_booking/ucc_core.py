@@ -41,6 +41,33 @@ class Stopped(Exception):
     pass
 
 
+def app_dir():
+    """存放設定與紀錄的資料夾：打包成 exe 時是 exe 所在資料夾，否則是程式所在資料夾。"""
+    import sys
+    from pathlib import Path
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def launch_browser(p, headless=False, chrome_path=None):
+    """開瀏覽器：指定路徑 → 電腦內建 Edge → Chrome → Playwright 內附 Chromium。
+    Windows 每台都有 Edge，所以打包成 exe 時不需要另外下載瀏覽器。"""
+    import os
+    kw = {"headless": headless}
+    if os.environ.get("HTTPS_PROXY"):                 # 雲端環境走代理
+        kw["proxy"] = {"server": os.environ["HTTPS_PROXY"]}
+    tries = [{"executable_path": chrome_path}] if chrome_path else []
+    tries += [{"channel": "msedge"}, {"channel": "chrome"}, {}]
+    err = None
+    for t in tries:
+        try:
+            return p.chromium.launch(**kw, **t)
+        except Exception as e:
+            err = e
+    raise RuntimeError(f"找不到可用的瀏覽器（Edge／Chrome）：{err}")
+
+
 # ============================================================ 標準時間 ====
 
 def _sntp(server, timeout=2.0):
@@ -402,7 +429,7 @@ class Booker:
             from pathlib import Path
             import json
             if self.cap_dir is None:
-                self.cap_dir = Path(__file__).with_name("captures") / dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+                self.cap_dir = (app_dir() / "captures") / dt.datetime.now().strftime("%Y%m%d_%H%M%S")
                 self.cap_dir.mkdir(parents=True, exist_ok=True)
                 self.log(f"原始碼保存於 {self.cap_dir}")
             self.step += 1
@@ -631,15 +658,7 @@ class Booker:
         o = self.o
         wishes = sorted(enumerate(o["wishes"]), key=lambda x: x[1]["date"], reverse=True)  # 日期由後往前
         with sync_playwright() as p:
-            kw = {"headless": o.get("headless", False)}
-            if o.get("chrome_path"):
-                kw["executable_path"] = o["chrome_path"]
-            if os.environ.get("HTTPS_PROXY"):                 # 雲端環境走代理
-                kw["proxy"] = {"server": os.environ["HTTPS_PROXY"]}
-            try:
-                browser = p.chromium.launch(**kw)
-            except Exception:
-                browser = p.chromium.launch(channel="chrome", **kw)
+            browser = launch_browser(p, o.get("headless", False), o.get("chrome_path"))
             ctx = browser.new_context(ignore_https_errors=False)
             # 不載入圖片/字型/影片，加快速度
             ctx.route("**/*", lambda r: r.abort() if r.request.resource_type in ("image", "font", "media")
@@ -706,7 +725,7 @@ class Booker:
                 self.log(f"錯誤：{e}")
                 try:
                     from pathlib import Path
-                    Path(__file__).with_name("inspect_report_error.txt").write_text(self.dump(), encoding="utf-8")
+                    (app_dir() / "inspect_report_error.txt").write_text(self.dump(), encoding="utf-8")
                     self.capture("錯誤")
                     self.log("已保存網頁結構（inspect_report_error.txt 與 captures/）")
                 except Exception:
@@ -730,7 +749,7 @@ class Booker:
         """只開網頁並錄下原始碼與網路請求，讓你手動操作一輪。"""
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False)
+            browser = launch_browser(p, False, self.o.get("chrome_path"))
             self.page = browser.new_page()
             self.page.on("dialog", self._on_dialog)
             self.page.on("request", self._on_request)

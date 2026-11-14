@@ -198,7 +198,7 @@ class FastBooker:
         from pathlib import Path
         src = frame.evaluate(SOURCE_JS)
         h = hashlib.sha256(src["code"].encode()).hexdigest()[:12]
-        d = Path(__file__).with_name("source_history")
+        d = core.app_dir() / "source_history"
         d.mkdir(exist_ok=True)
         last = d / "latest.txt"
         prev = last.read_text().strip() if last.exists() else ""
@@ -269,15 +269,7 @@ class FastBooker:
         o = self.o
         plan = build_plan(o["wishes"])
         with sync_playwright() as p:
-            kw = {"headless": o.get("headless", False)}
-            if o.get("chrome_path"):
-                kw["executable_path"] = o["chrome_path"]
-            if os.environ.get("HTTPS_PROXY"):
-                kw["proxy"] = {"server": os.environ["HTTPS_PROXY"]}
-            try:
-                browser = p.chromium.launch(**kw)
-            except Exception:
-                browser = p.chromium.launch(channel="chrome", **kw)
+            browser = core.launch_browser(p, o.get("headless", False), o.get("chrome_path"))
             ctx = browser.new_context()
             ctx.route("**/*", lambda r: r.abort() if r.request.resource_type in ("image", "font", "media")
                       else r.continue_())

@@ -21,7 +21,7 @@ ap.add_argument("--pause", action="store_true")
 a = ap.parse_args()
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(headless=False)
+    browser = core.launch_browser(p, False)
     b = core.Booker({"url": a.url})
     b.page = browser.new_page()
     b.page.goto(a.url, wait_until="domcontentloaded", timeout=60000)

@@ -1,0 +1,8 @@
+config.json
+gui_settings.json
+inspect_report*.txt
+*.png
+__pycache__/
+captures/
+source_history/
+wishes.json

@@ -1,0 +1,53 @@
+name: Build registration app (Windows)
+
+on:
+  push:
+    branches: [claude/hopeful-turing-uecx9m]
+    paths:
+      - "auto_register/**"
+      - ".github/workflows/build-desktop.yml"
+  workflow_dispatch:
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: auto_register
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip playwright pyinstaller
+
+      - name: Build exe
+        run: >
+          pyinstaller --noconfirm --onefile --windowed --name AutoRegister
+          --collect-all playwright
+          --hidden-import check_settings --hidden-import reg_core --hidden-import reg_fast
+          reg_gui.py
+
+      - name: Self-test (opens a browser only, books nothing)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\AutoRegister.exe -ArgumentList "--selftest" -Wait -PassThru
+          Get-Content dist\selftest.txt
+          if ($p.ExitCode -ne 0) { throw "selftest failed with exit code $($p.ExitCode)" }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item dist\AutoRegister.exe out\
+          Copy-Item README.md out\
+          Copy-Item PROJECT.md out\
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoRegister-windows
+          path: auto_register/out/
+          retention-days: 30
